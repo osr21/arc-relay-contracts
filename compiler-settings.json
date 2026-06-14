@@ -1,0 +1,16 @@
+{
+  "language": "Solidity",
+  "version": "0.8.20",
+  "evmVersion": "paris",
+  "optimizer": {
+    "enabled": true,
+    "runs": 200
+  },
+  "note": "evmVersion:paris required — Arc Testnet and Fuji reject PUSH0 (Shanghai). All 4 contracts use same settings.",
+  "verification": {
+    "arc": "https://testnet.arcscan.app",
+    "sepolia": "https://sepolia.etherscan.io",
+    "base": "https://sepolia.basescan.org",
+    "fuji": "https://testnet.snowtrace.io"
+  }
+}
