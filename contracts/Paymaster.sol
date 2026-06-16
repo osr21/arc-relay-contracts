@@ -148,6 +148,11 @@ contract Paymaster {
         require(_relayer      != address(0), "Paymaster: zero relayer");
         require(_feeRecipient != address(0), "Paymaster: zero fee recipient");
 
+        // FIX: enforce MAX_GAS_RATE in constructor — setGasRate() enforces it
+        // but the constructor previously had no upper-bound check, allowing
+        // a deployment to silently bypass the cap.
+        require(_gasRate <= MAX_GAS_RATE, "Paymaster: rate exceeds max");
+
         usdc         = _usdc;
         relayer      = _relayer;
         feeRecipient = _feeRecipient;
