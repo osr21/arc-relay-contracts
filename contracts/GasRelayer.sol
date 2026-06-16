@@ -156,9 +156,15 @@ contract GasRelayer {
     /**
      * @notice Rescue ERC-20 tokens accidentally sent to this contract.
      *         Cannot be called re-entrantly (nonReentrant on relay guards this).
+     * @dev    FIX: blocks rescue of USDC. Although USDC only exists transiently
+     *         in this contract during relay(), a malicious or compromised owner
+     *         could otherwise drain USDC sitting in the contract between calls.
+     *         Any USDC that genuinely needs recovery should be handled via a
+     *         governance process, not this emergency escape hatch.
      */
     function rescueTokens(address token, address to, uint256 amount) external onlyOwner {
-        require(to != address(0), "GasRelayer: zero address");
+        require(to    != address(0), "GasRelayer: zero address");
+        require(token != usdc,       "GasRelayer: cannot rescue USDC");
         require(IERC20(token).transfer(to, amount), "GasRelayer: rescue failed");
     }
 }
