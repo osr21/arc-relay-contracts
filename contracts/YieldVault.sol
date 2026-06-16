@@ -17,6 +17,12 @@ pragma solidity ^0.8.20;
  *   Base Sepolia   — 12.3% APY
  *   Avalanche Fuji —  9.2% APY
  *   Eth Sepolia    —  7.8% APY (lowest)
+ *
+ * Security properties
+ * ───────────────────
+ *   - Reentrancy lock on deposit() and withdraw().
+ *   - rescueTokens() blocks rescue of USDC to protect user deposits.
+ *   - Two-step ownership transfer with zero-address guard.
  */
 
 interface IERC20 {
@@ -36,6 +42,9 @@ contract YieldVault {
     string  public vaultName;
     /// @notice Total USDC deposited by users (not counting yield).
     uint256 public totalDeposited;
+
+    // ── Reentrancy lock ───────────────────────────────────────────────────────
+    bool private _locked;
 
     struct Position {
         uint256 principal;        // USDC currently deposited
@@ -61,10 +70,22 @@ contract YieldVault {
     error NoPosition();
     error ApyTooHigh();
     error TransferFailed();
+    error Reentrant();
+    error ZeroAddress();
+    error CannotRescueUsdc();
+
+    // ── Modifiers ─────────────────────────────────────────────────────────────
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked) revert Reentrant();
+        _locked = true;
+        _;
+        _locked = false;
     }
 
     constructor(address _usdc, uint256 _apyBps, string memory _vaultName) {
@@ -82,7 +103,7 @@ contract YieldVault {
      * @notice Deposit USDC into the vault.
      * @param amount Amount of USDC to deposit (6 decimals).
      */
-    function deposit(uint256 amount) external {
+    function deposit(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         Position storage pos = positions[msg.sender];
 
@@ -106,25 +127,28 @@ contract YieldVault {
      *         receives only the available balance (principal is always safe).
      * @return received Actual USDC transferred to the caller.
      */
-    function withdraw() external returns (uint256 received) {
+    function withdraw() external nonReentrant returns (uint256 received) {
         Position storage pos = positions[msg.sender];
         if (pos.principal == 0) revert NoPosition();
 
+        // FIX: cache principal before delete — pos.principal is 0 after delete
+        uint256 principal   = pos.principal;
         uint256 yieldEarned = pos.checkpointYield
-            + _computeYield(pos.principal, pos.lastTimestamp);
-        uint256 total = pos.principal + yieldEarned;
+            + _computeYield(principal, pos.lastTimestamp);
+        uint256 total = principal + yieldEarned;
 
         // Cap at vault's available USDC balance (yield is only paid if funded)
         uint256 available = usdc.balanceOf(address(this));
         received = total > available ? available : total;
 
-        uint256 yieldPaid = received > pos.principal ? received - pos.principal : 0;
+        uint256 yieldPaid = received > principal ? received - principal : 0;
 
-        totalDeposited -= pos.principal;
+        totalDeposited -= principal;
         delete positions[msg.sender];
 
         if (!usdc.transfer(msg.sender, received)) revert TransferFailed();
-        emit Withdrawn(msg.sender, pos.principal, yieldPaid, received);
+        // FIX: emit cached `principal`, not stale storage ref (which is 0 after delete)
+        emit Withdrawn(msg.sender, principal, yieldPaid, received);
     }
 
     // ── View ─────────────────────────────────────────────────────────────────
@@ -176,13 +200,27 @@ contract YieldVault {
         emit VaultFunded(msg.sender, amount);
     }
 
-    /// @notice Rescue accidentally sent tokens or recover surplus yield capacity.
+    /**
+     * @notice Rescue accidentally sent tokens or recover surplus yield capacity.
+     * @dev    Explicitly blocks rescue of USDC to protect user deposits.
+     *         An owner cannot drain user principal via this path.
+     */
     function rescueTokens(address token, address to, uint256 amount) external onlyOwner {
+        // FIX: block USDC rescue — prevents owner from draining user deposits
+        if (token == address(usdc)) revert CannotRescueUsdc();
+        if (to == address(0)) revert ZeroAddress();
         if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
     }
 
-    /// @notice Initiate two-step ownership transfer.
+    /**
+     * @notice Initiate two-step ownership transfer.
+     * @dev    FIX: added zero-address guard — prevents locking acceptOwnership
+     *         in an unresolvable state.
+     */
     function transferOwnership(address newOwner) external onlyOwner {
+        // FIX: guard against zero address — setting pendingOwner=0 would make
+        // acceptOwnership permanently uncallable (no address can satisfy msg.sender==0)
+        if (newOwner == address(0)) revert ZeroAddress();
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
