@@ -14,6 +14,7 @@ pragma solidity ^0.8.20;
  *   - Reentrancy lock on bridge().
  *   - Zero mintRecipient check — prevents burning to the zero address.
  *   - rescueTokens() return-value check — surfaces ERC-20 failures that don't revert.
+ *   - Two-step ownership transfer — prevents permanent ownership loss on typo.
  */
 
 interface IERC20 {
@@ -45,6 +46,8 @@ contract FeeRouter {
 
     // ── Mutable admin state ──────────────────────────────────────────────────
     address public owner;
+    /// @notice Pending owner for two-step transfer (zero = no transfer in progress).
+    address public pendingOwner;
     address public feeRecipient;
     uint256 public feeBps;
 
@@ -64,7 +67,9 @@ contract FeeRouter {
     );
     event FeeUpdated(uint256 oldBps, uint256 newBps);
     event FeeRecipientUpdated(address oldRecipient, address newRecipient);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    // FIX: split into started + completed to match two-step pattern
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ── Modifiers ────────────────────────────────────────────────────────────
     modifier onlyOwner() {
@@ -177,17 +182,35 @@ contract FeeRouter {
         feeRecipient = _feeRecipient;
     }
 
-    // ── Admin: ownership transfer ────────────────────────────────────────────
+    // ── Admin: ownership transfer (two-step) ─────────────────────────────────
+    /**
+     * @notice Initiate a two-step ownership transfer.
+     * @dev    FIX: was single-step (owner = newOwner immediately). Now requires
+     *         the new owner to call acceptOwnership(), preventing permanent
+     *         ownership loss if a wrong address is supplied.
+     */
     function transferOwnership(address newOwner) external onlyOwner {
         require(newOwner != address(0), "FeeRouter: zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /**
+     * @notice Complete a pending ownership transfer.
+     *         Must be called by the address set in transferOwnership().
+     */
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "FeeRouter: not pending owner");
+        emit OwnershipTransferred(owner, pendingOwner);
+        owner        = pendingOwner;
+        pendingOwner = address(0);
     }
 
     // ── Admin: token rescue ───────────────────────────────────────────────────
     /**
      * @notice Rescue accidentally-sent tokens. Only callable by owner.
      * @dev Return value explicitly required to surface non-reverting ERC-20 failures.
+     *      Sends to owner's address (not a parameter) to limit attack surface.
      */
     function rescueTokens(address token, uint256 amount) external onlyOwner {
         require(IERC20(token).transfer(owner, amount), "FeeRouter: rescue failed");
